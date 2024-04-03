@@ -1,5 +1,5 @@
 {
-    "name": "cesargb/laravel-cascade-delete",
+    "name": "deliverup/laravel-cascade-delete",
     "description": "Cascading eliminations implemented in polymorphic relationships for the Laravel apps",
     "keywords": [
         "laravel",
