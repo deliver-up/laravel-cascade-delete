@@ -7,19 +7,34 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphOneOrMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Fluent;
 use Symfony\Component\Finder\Finder;
 
 class Morph
 {
-    /**
-     * Delete polymorphic relationships of the single records from Model.
-     *
-     * @param  \Illuminate\Database\Eloquent\Model  $model
-     * @return void
-     */
-    public function delete($model)
+    protected Collection $models;
+
+    protected Collection $filters;
+
+    public function __construct()
+    {
+        $this->models = collect();
+        $this->filters = collect();
+    }
+
+    public function addModelToFilters(array $tables = []): static
+    {
+        collect($tables)
+            ->reject(fn (string $table) => empty($table))
+            ->each(fn (string $table) => $this->filters->push($table));
+
+        return $this;
+    }
+
+    public function delete($model): void
     {
         foreach ($this->getValidMorphRelationsFromModel($model) as $relationMorph) {
             if ($relationMorph instanceof MorphOneOrMany) {
@@ -30,38 +45,28 @@ class Morph
         }
     }
 
-    /**
-     * Clean residual polymorphic relationships from all Models.
-     *
-     * @param  bool  $dryRun
-     * @return int Num rows was deleted
-     */
-    public function cleanResidualAllModels(bool $dryRun = false)
+    public function cleanResidualAllModels(bool $dryRun = false): int
     {
         $numRowsDeleted = 0;
-
         foreach ($this->getCascadeDeleteModels() as $model) {
+
+            if (! $this->filters->isEmpty() && ! $this->filters->flip()->has($model->getTable())) {
+                continue;
+            }
+            $this->models->put($model::class, collect());
             $numRowsDeleted += $this->cleanResidualByModel($model, $dryRun);
         }
 
         return $numRowsDeleted;
     }
 
-    /**
-     * Clean residual polymorphic relationships from a Model.
-     *
-     * @param  Model  $model
-     * @param  bool  $dryRun
-     * @return int Num rows was deleted
-     */
-    public function cleanResidualByModel($model, bool $dryRun = false)
+    public function cleanResidualByModel($model, bool $dryRun = false): int
     {
         $numRowsDeleted = 0;
 
         foreach ($this->getValidMorphRelationsFromModel($model) as $relation) {
             if ($relation instanceof MorphOneOrMany || $relation instanceof MorphToMany) {
                 $deleted = $this->queryCleanOrphan($model, $relation, $dryRun);
-
                 if ($deleted > 0) {
                     Event::dispatch(
                         new RelationMorphFromModelWasCleaned($model, $relation, $deleted, $dryRun)
@@ -75,12 +80,16 @@ class Morph
         return $numRowsDeleted;
     }
 
-    /**
-     * Get the classes that use the trait CascadeDelete.
-     *
-     * @return \Illuminate\Database\Eloquent\Model[]
-     */
-    protected function getCascadeDeleteModels()
+    public function getModels()
+    {
+        if ($this->models->isEmpty()) {
+            $this->cleanResidualAllModels(dryRun: true);
+        }
+
+        return $this->models;
+    }
+
+    protected function getCascadeDeleteModels(): array
     {
         $this->load();
 
@@ -92,39 +101,50 @@ class Morph
         );
     }
 
-    /**
-     * Query to clean orphan morph table.
-     *
-     * @param  Model  $parentModel
-     * @param  MorphOneOrMany|MorphToMany  $relation
-     * @param  bool  $dryRun
-     * @return int Num rows was deleted
-     */
-    protected function queryCleanOrphan(Model $parentModel, Relation $relation, bool $dryRun = false)
+    protected function queryCleanOrphan(Model $parentModel, Relation $relation, bool $dryRun = false): int
     {
         [$childTable, $childFieldType, $childFieldId] = $this->getStructureMorphRelation($relation);
 
-        $method = $dryRun ? 'count' : 'delete';
+        $query = DB::table($childTable)
+            ->where($childFieldType, $parentModel->getMorphClass())
+            ->whereNotExists(function ($query) use (
+                $parentModel,
+                $childTable,
+                $childFieldId
+            ) {
+                $query->select(DB::raw(1))
+                    ->from($parentModel->getTable())
+                    ->whereColumn($parentModel->getTable().'.'.$parentModel->getKeyName(), '=', $childTable.'.'.$childFieldId);
+            });
 
-        return DB::table($childTable)
-                ->where($childFieldType, $parentModel->getMorphClass())
-                ->whereNotExists(function ($query) use (
-                    $parentModel,
-                    $childTable,
-                    $childFieldId
-                ) {
-                    $query->select(DB::raw(1))
-                            ->from($parentModel->getTable())
-                            ->whereColumn($parentModel->getTable() . '.' . $parentModel->getKeyName(), '=', $childTable . '.' . $childFieldId);
-                })->$method();
+        $to_delete = $query->count();
+
+        $this->models->get($parentModel::class)->push(new Fluent([
+            'parentModel' => $parentModel,
+            'childTable' => $childTable,
+            'childFieldType' => $childFieldType,
+            'childFieldId' => $childFieldId,
+            'toDelete' => $to_delete,
+        ]));
+
+        return $to_delete;
     }
 
-    /**
-     * Get table and fields from morph relation.
-     *
-     * @param  MorphOneOrMany|MorphToMany  $relation
-     * @return array [$table, $fieldType, $fieldId]
-     */
+    public function deleteSpecificRelation($childTable, $childFieldType, $childFieldId, $parentModel, $limit = 10): int
+    {
+        return DB::table($childTable)
+            ->where($childFieldType, $parentModel->getMorphClass())
+            ->whereNotExists(function ($query) use (
+                $parentModel,
+                $childTable,
+                $childFieldId
+            ) {
+                $query->select(DB::raw(1))
+                    ->from($parentModel->getTable())
+                    ->whereColumn($parentModel->getTable().'.'.$parentModel->getKeyName(), '=', $childTable.'.'.$childFieldId);
+            })->limit($limit)->delete();
+    }
+
     protected function getStructureMorphRelation(Relation $relation): array
     {
         $fieldType = $relation->getMorphType();
@@ -142,12 +162,7 @@ class Morph
         return [$table, $fieldType, $fieldId];
     }
 
-    /**
-     * Get the classes names that use the trait CascadeDelete.
-     *
-     * @return array
-     */
-    protected function getModelsNameWithCascadeDeleteTrait()
+    protected function getModelsNameWithCascadeDeleteTrait(): array
     {
         return array_filter(
             get_declared_classes(),
@@ -160,13 +175,7 @@ class Morph
         );
     }
 
-    /**
-     * Fetch polymorphic relationships from a Model.
-     *
-     * @param  \Illuminate\Database\Eloquent\Model  $model
-     * @return array
-     */
-    protected function getValidMorphRelationsFromModel($model)
+    protected function getValidMorphRelationsFromModel($model): array
     {
         if (! method_exists($model, 'getCascadeDeleteMorph')) {
             return [];
@@ -185,13 +194,6 @@ class Morph
         );
     }
 
-    /**
-     * Verify if method of a Model return a polymorphic relationship.
-     *
-     * @param  \Illuminate\Database\Eloquent\Model  $model
-     * @param  string  $methodName
-     * @return bool
-     */
     protected function methodReturnedMorphRelation($model, $methodName)
     {
         if (! method_exists($model, $methodName)) {
@@ -203,23 +205,12 @@ class Morph
         return $this->isMorphRelation($relation) ? $relation : null;
     }
 
-    /**
-     * Verify if a object is a instance of a polymorphic relationship.
-     *
-     * @param  mixed  $relation
-     * @return bool
-     */
-    protected function isMorphRelation($relation)
+    protected function isMorphRelation($relation): bool
     {
         return $relation instanceof MorphOneOrMany || $relation instanceof MorphToMany;
     }
 
-    /**
-     * Load models with Cascade Delete.
-     *
-     * @return void
-     */
-    protected function load()
+    protected function load(): void
     {
         foreach ($this->findModels() as $file) {
             require_once $file->getPathname();
