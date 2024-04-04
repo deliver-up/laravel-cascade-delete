@@ -119,15 +119,21 @@ class Morph
 
         $to_delete = $query->count();
 
-        $this->models->get($parentModel::class)->push(new Fluent([
-            'parentModel' => $parentModel,
-            'childTable' => $childTable,
-            'childFieldType' => $childFieldType,
-            'childFieldId' => $childFieldId,
-            'toDelete' => $to_delete,
-        ]));
+        if ($this->models->has($parentModel::class)) {
+            $this->models->get($parentModel::class)->push(new Fluent([
+                'parentModel' => $parentModel,
+                'childTable' => $childTable,
+                'childFieldType' => $childFieldType,
+                'childFieldId' => $childFieldId,
+                'toDelete' => $to_delete,
+            ]));
+        }
 
-        return $to_delete;
+        if ($dryRun) {
+            return $to_delete;
+        }
+
+        return $query->delete();
     }
 
     public function deleteSpecificRelation($childTable, $childFieldType, $childFieldId, $parentModel, $limit = 10): int
