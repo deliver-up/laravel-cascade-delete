@@ -14,45 +14,48 @@ class MorphCleanCommand extends Command
     protected $signature = 'morph:clean
                                 {--dry-run : test clean}
                                 {--tables= : Table list separated by comma}
-                                {--limit=100 : Define limit for delete progress}';
+                                {--limit=1000 : Define limit for delete progress}';
 
     protected $description = 'Clean break relations morph';
 
-    public function handle()
+    public function handle(): int
     {
 
         $morph = new Morph();
 
         $morph
-            ->addModelToFilters(preg_split('/,/', $this->option('tables')))
+            ->addModelToFilters(explode(',', $this->option('tables')))
             ->getModels()
-            ->each(function ($relations, $model) use ($morph) {
-                $relations->each(function (Fluent $children) use ($model, $morph) {
-                    if ($children->toDelete <= 0) {
-                        return true;
-                    }
+            ->each(fn ($relations, $model) => $relations->each(function (Fluent $children) use ($model, $morph) {
 
-                    $progress = progress(label: sprintf(
-                        '%s in table %s: %d',
-                        Str::remove("dukmaurice\\fuel\Entities\\", $model),
-                        $children->childTable,
-                        $children->toDelete
-                    ), steps: ceil($children->toDelete / $this->option('limit')));
-                    $progress->start();
-                    for ($i = 0; $i < ceil($children->toDelete / $this->option('limit')); $i++) {
-                        if (! $this->option('dry-run')) {
-                            $morph->deleteSpecificRelation(
-                                parentModel: $children->parentModel,
-                                childFieldType: $children->childFieldType,
-                                childFieldId: $children->childFieldId,
-                                childTable: $children->childTable,
-                                limit: $this->option('limit')
-                            );
-                        }
-                        $progress->advance();
+                $this->info("Search $model on table {$children->childTable}...");
+
+                if ($children->toDelete <= 0) {
+                    return true;
+                }
+
+                $progress = progress(label: sprintf(
+                    '%s in table %s: %d',
+                    Str::remove("dukmaurice\\fuel\Entities\\", $model),
+                    $children->childTable,
+                    $children->toDelete
+                ), steps: ceil($children->toDelete / $this->option('limit')));
+                $progress->start();
+                for ($i = 0; $i < ceil($children->toDelete / $this->option('limit')); $i++) {
+                    if (! $this->option('dry-run')) {
+                        $morph->deleteSpecificRelation(
+                            childTable: $children->childTable,
+                            childFieldType: $children->childFieldType,
+                            childFieldId: $children->childFieldId,
+                            parentModel: $children->parentModel,
+                            limit: $this->option('limit')
+                        );
                     }
-                    $progress->finish();
-                });
-            });
+                    $progress->advance();
+                }
+                $progress->finish();
+            }));
+
+        return Command::SUCCESS;
     }
 }
